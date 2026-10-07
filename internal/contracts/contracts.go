@@ -14,11 +14,18 @@ type OpenCaseRequest struct {
 	Nominal   float64 `json:"nominal"`
 	Tolerance float64 `json:"tolerance"`
 	Steward   string  `json:"steward"`
+	RiskLevel string  `json:"risk_level"`
 }
 
 type RecordMeasurementRequest struct {
 	Observed   float64 `json:"observed"`
 	Technician string  `json:"technician"`
+}
+
+type RecordConfirmationRequest struct {
+	MeasurementID string `json:"measurement_id"`
+	Confirmer     string `json:"confirmer"`
+	Basis         string `json:"basis"`
 }
 
 type ReopenCaseRequest struct {
@@ -36,10 +43,11 @@ type DeviceResponse struct {
 }
 
 type CaseResponse struct {
-	Case         domain.VerificationCase `json:"case"`
-	Measurements []domain.Measurement    `json:"measurements"`
-	Seal         *domain.EvidenceSeal    `json:"seal,omitempty"`
-	Events       []domain.AuditEvent     `json:"events"`
+	Case          domain.VerificationCase `json:"case"`
+	Measurements  []domain.Measurement    `json:"measurements"`
+	Confirmations []domain.Confirmation   `json:"confirmations"`
+	Seal          *domain.EvidenceSeal    `json:"seal,omitempty"`
+	Events        []domain.AuditEvent     `json:"events"`
 }
 
 type EventsResponse struct {

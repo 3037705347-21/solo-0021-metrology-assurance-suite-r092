@@ -9,31 +9,34 @@ import (
 )
 
 type Repository struct {
-	mu           sync.RWMutex
-	devices      map[string]domain.Device
-	cases        map[string]domain.VerificationCase
-	measurements map[string][]domain.Measurement
-	seals        map[string]domain.EvidenceSeal
-	events       []domain.AuditEvent
-	counters     map[string]int
+	mu            sync.RWMutex
+	devices       map[string]domain.Device
+	cases         map[string]domain.VerificationCase
+	measurements  map[string][]domain.Measurement
+	confirmations map[string][]domain.Confirmation
+	seals         map[string]domain.EvidenceSeal
+	events        []domain.AuditEvent
+	counters      map[string]int
 }
 
 func New() *Repository {
 	return &Repository{
-		devices:      make(map[string]domain.Device),
-		cases:        make(map[string]domain.VerificationCase),
-		measurements: make(map[string][]domain.Measurement),
-		seals:        make(map[string]domain.EvidenceSeal),
-		counters:     make(map[string]int),
+		devices:       make(map[string]domain.Device),
+		cases:         make(map[string]domain.VerificationCase),
+		measurements:  make(map[string][]domain.Measurement),
+		confirmations: make(map[string][]domain.Confirmation),
+		seals:         make(map[string]domain.EvidenceSeal),
+		counters:      make(map[string]int),
 	}
 }
 
 type Snapshot struct {
-	devices      map[string]domain.Device
-	cases        map[string]domain.VerificationCase
-	measurements map[string][]domain.Measurement
-	seals        map[string]domain.EvidenceSeal
-	events       []domain.AuditEvent
+	devices       map[string]domain.Device
+	cases         map[string]domain.VerificationCase
+	measurements  map[string][]domain.Measurement
+	confirmations map[string][]domain.Confirmation
+	seals         map[string]domain.EvidenceSeal
+	events        []domain.AuditEvent
 }
 
 func (s Snapshot) Device(id string) (domain.Device, bool) {
@@ -57,6 +60,10 @@ func (s Snapshot) Case(id string) (domain.VerificationCase, bool) {
 
 func (s Snapshot) Measurements(caseID string) []domain.Measurement {
 	return append([]domain.Measurement(nil), s.measurements[caseID]...)
+}
+
+func (s Snapshot) Confirmations(caseID string) []domain.Confirmation {
+	return append([]domain.Confirmation{}, s.confirmations[caseID]...)
 }
 
 func (s Snapshot) Seal(caseID string) (domain.EvidenceSeal, bool) {
@@ -91,12 +98,13 @@ func (s Snapshot) AllCases() []domain.VerificationCase {
 }
 
 type Mutation struct {
-	devices      map[string]domain.Device
-	cases        map[string]domain.VerificationCase
-	measurements map[string][]domain.Measurement
-	seals        map[string]domain.EvidenceSeal
-	events       []domain.AuditEvent
-	counters     map[string]int
+	devices       map[string]domain.Device
+	cases         map[string]domain.VerificationCase
+	measurements  map[string][]domain.Measurement
+	confirmations map[string][]domain.Confirmation
+	seals         map[string]domain.EvidenceSeal
+	events        []domain.AuditEvent
+	counters      map[string]int
 }
 
 func (m *Mutation) NextID(prefix string) string {
@@ -176,6 +184,37 @@ func (m *Mutation) Measurements(caseID string) []domain.Measurement {
 	return append([]domain.Measurement(nil), m.measurements[caseID]...)
 }
 
+func (m *Mutation) Confirmations(caseID string) []domain.Confirmation {
+	return append([]domain.Confirmation{}, m.confirmations[caseID]...)
+}
+
+func (m *Mutation) ConfirmationForMeasurement(measurementID string) (domain.Confirmation, bool) {
+	for _, items := range m.confirmations {
+		for _, item := range items {
+			if item.MeasurementID == measurementID {
+				return item, true
+			}
+		}
+	}
+	return domain.Confirmation{}, false
+}
+
+// PutConfirmation appends a confirmation. A measurement can carry at most
+// one confirmation; the repository enforces it so a racing second request
+// fails instead of silently replacing the first record.
+func (m *Mutation) PutConfirmation(item domain.Confirmation) error {
+	if _, exists := m.cases[item.CaseID]; !exists {
+		return fmt.Errorf("%w: case %s", domain.ErrNotFound, item.CaseID)
+	}
+	for _, existing := range m.confirmations[item.CaseID] {
+		if existing.MeasurementID == item.MeasurementID {
+			return fmt.Errorf("%w: measurement %s", domain.ErrConfirmationExists, item.MeasurementID)
+		}
+	}
+	m.confirmations[item.CaseID] = append(m.confirmations[item.CaseID], item)
+	return nil
+}
+
 func (m *Mutation) Seal(caseID string) (domain.EvidenceSeal, bool) {
 	item, ok := m.seals[caseID]
 	return item, ok
@@ -220,12 +259,13 @@ func (r *Repository) Mutate(ctx context.Context, fn func(*Mutation) error) error
 	defer r.mu.Unlock()
 
 	next := &Mutation{
-		devices:      cloneDevices(r.devices),
-		cases:        cloneCases(r.cases),
-		measurements: cloneMeasurements(r.measurements),
-		seals:        cloneSeals(r.seals),
-		events:       append([]domain.AuditEvent(nil), r.events...),
-		counters:     cloneCounters(r.counters),
+		devices:       cloneDevices(r.devices),
+		cases:         cloneCases(r.cases),
+		measurements:  cloneMeasurements(r.measurements),
+		confirmations: cloneConfirmations(r.confirmations),
+		seals:         cloneSeals(r.seals),
+		events:        append([]domain.AuditEvent(nil), r.events...),
+		counters:      cloneCounters(r.counters),
 	}
 	if err := fn(next); err != nil {
 		return err
@@ -233,6 +273,7 @@ func (r *Repository) Mutate(ctx context.Context, fn func(*Mutation) error) error
 	r.devices = next.devices
 	r.cases = next.cases
 	r.measurements = next.measurements
+	r.confirmations = next.confirmations
 	r.seals = next.seals
 	r.events = next.events
 	r.counters = next.counters
@@ -241,11 +282,12 @@ func (r *Repository) Mutate(ctx context.Context, fn func(*Mutation) error) error
 
 func (r *Repository) snapshot() Snapshot {
 	return Snapshot{
-		devices:      cloneDevices(r.devices),
-		cases:        cloneCases(r.cases),
-		measurements: cloneMeasurements(r.measurements),
-		seals:        cloneSeals(r.seals),
-		events:       append([]domain.AuditEvent(nil), r.events...),
+		devices:       cloneDevices(r.devices),
+		cases:         cloneCases(r.cases),
+		measurements:  cloneMeasurements(r.measurements),
+		confirmations: cloneConfirmations(r.confirmations),
+		seals:         cloneSeals(r.seals),
+		events:        append([]domain.AuditEvent(nil), r.events...),
 	}
 }
 
@@ -269,6 +311,14 @@ func cloneMeasurements(values map[string][]domain.Measurement) map[string][]doma
 	result := make(map[string][]domain.Measurement, len(values))
 	for key, value := range values {
 		result[key] = append([]domain.Measurement(nil), value...)
+	}
+	return result
+}
+
+func cloneConfirmations(values map[string][]domain.Confirmation) map[string][]domain.Confirmation {
+	result := make(map[string][]domain.Confirmation, len(values))
+	for key, value := range values {
+		result[key] = append([]domain.Confirmation(nil), value...)
 	}
 	return result
 }

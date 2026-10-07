@@ -16,12 +16,33 @@ const (
 	CaseSealed              CaseState = "sealed"
 )
 
+type RiskLevel string
+
+const (
+	RiskStandard RiskLevel = "standard"
+	RiskHigh     RiskLevel = "high"
+)
+
+// ParseRiskLevel normalizes a requested risk level. An empty value defaults
+// to standard; anything else must name a known level exactly.
+func ParseRiskLevel(value string) (RiskLevel, error) {
+	switch normalized := RiskLevel(strings.ToLower(strings.TrimSpace(value))); normalized {
+	case "":
+		return RiskStandard, nil
+	case RiskStandard, RiskHigh:
+		return normalized, nil
+	default:
+		return "", fmt.Errorf("%w: unsupported risk level %q", ErrInvalidInput, value)
+	}
+}
+
 type VerificationCase struct {
 	ID        string     `json:"id"`
 	DeviceID  string     `json:"device_id"`
 	Nominal   float64    `json:"nominal"`
 	Tolerance float64    `json:"tolerance"`
 	Steward   string     `json:"steward"`
+	RiskLevel RiskLevel  `json:"risk_level"`
 	State     CaseState  `json:"state"`
 	Version   int        `json:"version"`
 	OpenedAt  time.Time  `json:"opened_at"`
@@ -29,13 +50,14 @@ type VerificationCase struct {
 	SealedAt  *time.Time `json:"sealed_at,omitempty"`
 }
 
-func NewVerificationCase(id, deviceID string, nominal, tolerance float64, steward string, at time.Time) (VerificationCase, error) {
+func NewVerificationCase(id, deviceID string, nominal, tolerance float64, steward string, riskLevel RiskLevel, at time.Time) (VerificationCase, error) {
 	item := VerificationCase{
 		ID:        strings.TrimSpace(id),
 		DeviceID:  strings.TrimSpace(deviceID),
 		Nominal:   nominal,
 		Tolerance: tolerance,
 		Steward:   strings.TrimSpace(steward),
+		RiskLevel: riskLevel,
 		State:     CaseAwaitingMeasurement,
 		Version:   1,
 		OpenedAt:  at.UTC(),
@@ -57,6 +79,11 @@ func (c VerificationCase) Validate() error {
 	if c.Version < 1 || c.OpenedAt.IsZero() || c.UpdatedAt.IsZero() {
 		return fmt.Errorf("%w: case version and timestamps are required", ErrInvalidInput)
 	}
+	switch c.RiskLevel {
+	case RiskStandard, RiskHigh:
+	default:
+		return fmt.Errorf("%w: unsupported risk level %q", ErrInvalidInput, c.RiskLevel)
+	}
 	switch c.State {
 	case CaseAwaitingMeasurement, CaseReviewReady, CaseRecheckRequired, CaseSealed:
 		return nil
@@ -67,6 +94,12 @@ func (c VerificationCase) Validate() error {
 
 func (c VerificationCase) IsUnfinished() bool {
 	return c.State != CaseSealed
+}
+
+// RequiresConfirmation reports whether this case's risk level demands an
+// independent confirmation of the sealed measurement.
+func (c VerificationCase) RequiresConfirmation() bool {
+	return c.RiskLevel == RiskHigh
 }
 
 func (c *VerificationCase) RecordMeasurement(accepted bool, at time.Time) error {

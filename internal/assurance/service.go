@@ -91,12 +91,17 @@ func (s *Service) OpenCase(ctx context.Context, input contracts.OpenCaseRequest)
 		if active, exists := m.ActiveCaseForDevice(device.ID); exists {
 			return fmt.Errorf("%w: case %s is still %s", domain.ErrActiveCaseExists, active.ID, active.State)
 		}
+		riskLevel, err := domain.ParseRiskLevel(input.RiskLevel)
+		if err != nil {
+			return err
+		}
 		item, err := domain.NewVerificationCase(
 			m.NextID("case"),
 			device.ID,
 			input.Nominal,
 			input.Tolerance,
 			input.Steward,
+			riskLevel,
 			s.now(),
 		)
 		if err != nil {
@@ -112,7 +117,7 @@ func (s *Service) OpenCase(ctx context.Context, input contracts.OpenCaseRequest)
 			item.ID,
 			"case_opened",
 			item.Steward,
-			"verification case opened",
+			fmt.Sprintf("verification case opened with %s risk level", item.RiskLevel),
 			s.now(),
 		)
 		if err != nil {
@@ -193,6 +198,78 @@ func (s *Service) RecordMeasurement(ctx context.Context, caseID string, input co
 	return result, err
 }
 
+func (s *Service) RecordConfirmation(ctx context.Context, caseID string, input contracts.RecordConfirmationRequest) (contracts.CaseResponse, error) {
+	var result contracts.CaseResponse
+	err := s.repository.Mutate(ctx, func(m *repository.Mutation) error {
+		id := strings.TrimSpace(caseID)
+		item, exists := m.Case(id)
+		if !exists {
+			return fmt.Errorf("%w: case %s", domain.ErrNotFound, id)
+		}
+		if item.State == domain.CaseSealed {
+			return fmt.Errorf("%w: a sealed case cannot accept confirmations", domain.ErrStateConflict)
+		}
+		measurementID := strings.TrimSpace(input.MeasurementID)
+		if measurementID == "" {
+			return fmt.Errorf("%w: measurement id is required", domain.ErrInvalidInput)
+		}
+		measurement, found := findMeasurement(m.Measurements(item.ID), measurementID)
+		if !found {
+			return fmt.Errorf("%w: measurement %s", domain.ErrNotFound, measurementID)
+		}
+		if !measurement.Accepted {
+			return fmt.Errorf("%w: only an accepted measurement can be confirmed", domain.ErrStateConflict)
+		}
+		confirmer := strings.TrimSpace(input.Confirmer)
+		if strings.EqualFold(confirmer, measurement.Technician) {
+			return fmt.Errorf("%w: confirmer %q recorded measurement %s", domain.ErrConfirmationNotIndependent, confirmer, measurement.ID)
+		}
+		if _, exists := m.ConfirmationForMeasurement(measurement.ID); exists {
+			return fmt.Errorf("%w: measurement %s", domain.ErrConfirmationExists, measurement.ID)
+		}
+		confirmation, err := domain.NewConfirmation(
+			m.NextID("confirmation"),
+			item.ID,
+			measurement.ID,
+			confirmer,
+			input.Basis,
+			s.now(),
+		)
+		if err != nil {
+			return err
+		}
+		if err := m.PutConfirmation(confirmation); err != nil {
+			return err
+		}
+		event, err := domain.NewAuditEvent(
+			m.NextID("event"),
+			"confirmation",
+			confirmation.ID,
+			item.ID,
+			"confirmation_recorded",
+			confirmation.Confirmer,
+			fmt.Sprintf("confirmed measurement %s: %s", measurement.ID, confirmation.Basis),
+			s.now(),
+		)
+		if err != nil {
+			return err
+		}
+		m.AppendEvent(event)
+		result = caseResponse(m, item)
+		return nil
+	})
+	return result, err
+}
+
+func findMeasurement(items []domain.Measurement, id string) (domain.Measurement, bool) {
+	for _, item := range items {
+		if item.ID == id {
+			return item, true
+		}
+	}
+	return domain.Measurement{}, false
+}
+
 func (s *Service) ReopenCase(ctx context.Context, caseID string, input contracts.ReopenCaseRequest) (contracts.CaseResponse, error) {
 	var result contracts.CaseResponse
 	err := s.repository.Mutate(ctx, func(m *repository.Mutation) error {
@@ -247,6 +324,14 @@ func (s *Service) SealCase(ctx context.Context, caseID string, input contracts.S
 		if !ok {
 			return fmt.Errorf("%w: an accepted measurement is required before sealing", domain.ErrStateConflict)
 		}
+		confirmationID := ""
+		if item.RequiresConfirmation() {
+			confirmation, exists := m.ConfirmationForMeasurement(measurement.ID)
+			if !exists {
+				return fmt.Errorf("%w: case %s requires an independent confirmation of measurement %s", domain.ErrConfirmationRequired, item.ID, measurement.ID)
+			}
+			confirmationID = confirmation.ID
+		}
 		if err := item.Seal(s.now()); err != nil {
 			return err
 		}
@@ -255,6 +340,7 @@ func (s *Service) SealCase(ctx context.Context, caseID string, input contracts.S
 			item.ID,
 			item.DeviceID,
 			measurement.ID,
+			confirmationID,
 			input.Reviewer,
 			input.Summary,
 			s.now(),
@@ -305,9 +391,10 @@ func bestAcceptedMeasurement(items []domain.Measurement) (domain.Measurement, bo
 
 func caseResponse(m *repository.Mutation, item domain.VerificationCase) contracts.CaseResponse {
 	result := contracts.CaseResponse{
-		Case:         item,
-		Measurements: m.Measurements(item.ID),
-		Events:       m.Events(item.ID),
+		Case:          item,
+		Measurements:  m.Measurements(item.ID),
+		Confirmations: m.Confirmations(item.ID),
+		Events:        m.Events(item.ID),
 	}
 	if seal, exists := m.Seal(item.ID); exists {
 		result.Seal = &seal
@@ -317,9 +404,10 @@ func caseResponse(m *repository.Mutation, item domain.VerificationCase) contract
 
 func caseResponseFromSnapshot(snapshot repository.Snapshot, item domain.VerificationCase) contracts.CaseResponse {
 	result := contracts.CaseResponse{
-		Case:         item,
-		Measurements: snapshot.Measurements(item.ID),
-		Events:       snapshot.Events(item.ID),
+		Case:          item,
+		Measurements:  snapshot.Measurements(item.ID),
+		Confirmations: snapshot.Confirmations(item.ID),
+		Events:        snapshot.Events(item.ID),
 	}
 	if seal, exists := snapshot.Seal(item.ID); exists {
 		result.Seal = &seal

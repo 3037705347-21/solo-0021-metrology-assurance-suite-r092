@@ -2,8 +2,9 @@
 
 Metrology Assurance Suite is a Go HTTP service for bounded laboratory
 measurement assurance work. It registers devices, opens verification cases,
-records measurements, handles failed tolerance decisions, and seals traceable
-evidence records.
+records measurements, handles failed tolerance decisions, requires independent
+second-person confirmation on high-risk cases, and seals traceable evidence
+records.
 
 ## Run
 
@@ -20,6 +21,7 @@ go build ./...
 go run ./cmd/workflowcheck --workflow register-device
 go run ./cmd/workflowcheck --workflow open-verification-case
 go run ./cmd/workflowcheck --workflow record-measurement
+go run ./cmd/workflowcheck --workflow confirm-measurement
 go run ./cmd/workflowcheck --workflow reopen-verification-case
 go run ./cmd/workflowcheck --workflow seal-verification
 ```
@@ -39,9 +41,28 @@ or extend these smoke checks with red/green verification tests.
 - `POST /cases`
 - `GET /cases/{id}`
 - `POST /cases/{id}/measurements`
+- `POST /cases/{id}/confirmations`
 - `POST /cases/{id}/reopen`
 - `POST /cases/{id}/seal`
 - `GET /cases/{id}/events`
+
+## Risk Levels And Confirmation
+
+A case is opened with a `risk_level` of `standard` (default) or `high`. A
+high-risk case can be sealed only after a second person confirms the selected
+accepted measurement through `POST /cases/{id}/confirmations`:
+
+```json
+{
+  "measurement_id": "measurement-0001",
+  "confirmer": "Mira",
+  "basis": "re-observed reading with reference standard REF-7"
+}
+```
+
+The confirmer must differ from the technician who recorded the measurement.
+Each measurement carries at most one immutable confirmation, and the evidence
+seal of a high-risk case cites the confirmation that authorizes it.
 
 ## Layout
 

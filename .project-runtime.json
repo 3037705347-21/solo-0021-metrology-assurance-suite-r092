@@ -24,6 +24,10 @@
       "command": "go run ./cmd/workflowcheck --workflow record-measurement"
     },
     {
+      "workflow_id": "confirm-measurement",
+      "command": "go run ./cmd/workflowcheck --workflow confirm-measurement"
+    },
+    {
       "workflow_id": "reopen-verification-case",
       "command": "go run ./cmd/workflowcheck --workflow reopen-verification-case"
     },

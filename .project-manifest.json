@@ -113,6 +113,28 @@
       ]
     },
     {
+      "id": "confirm-measurement",
+      "name": "Confirm measurement",
+      "entry": "POST /cases/{id}/confirmations",
+      "steps": [
+        "load the case and the accepted measurement it targets",
+        "reject a confirmer who recorded the measurement and any duplicate confirmation",
+        "append the immutable confirmation and its audit event in one commit"
+      ],
+      "success": "returns the case with the new confirmation record",
+      "failure": "returns not-found, not-independent, duplicate, or state conflict errors and commits nothing",
+      "verification": "workflowcheck rejects self-confirmation, duplicate and concurrent confirmations, and sealing an unconfirmed high-risk case",
+      "module_ids": [
+        "runtimecheck",
+        "httpapi",
+        "assurance",
+        "domain",
+        "repository",
+        "contracts",
+        "bootstrap"
+      ]
+    },
+    {
       "id": "reopen-verification-case",
       "name": "Reopen verification case",
       "entry": "POST /cases/{id}/reopen",

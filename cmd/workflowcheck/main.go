@@ -38,6 +38,7 @@ func main() {
 		"register-device":          checkRegisterDevice,
 		"open-verification-case":   checkOpenVerificationCase,
 		"record-measurement":       checkRecordMeasurement,
+		"confirm-measurement":      checkConfirmMeasurement,
 		"reopen-verification-case": checkReopenVerificationCase,
 		"seal-verification":        checkSealVerification,
 	}
@@ -240,6 +241,283 @@ func checkRecordMeasurement() error {
 	}
 	if rejectedValue {
 		return errors.New("out-of-tolerance measurement was accepted")
+	}
+	return nil
+}
+
+func checkConfirmMeasurement() error {
+	h := newHarness()
+	defer h.close()
+
+	deviceID, err := h.createDevice("MET-1501")
+	if err != nil {
+		return err
+	}
+	opened, err := h.openHighRiskCase(deviceID)
+	if err != nil {
+		return err
+	}
+	caseID, err := nestedString(opened.Body, "case", "id")
+	if err != nil {
+		return err
+	}
+	riskLevel, err := nestedString(opened.Body, "case", "risk_level")
+	if err != nil {
+		return err
+	}
+	if riskLevel != "high" {
+		return fmt.Errorf("high-risk case risk_level = %q", riskLevel)
+	}
+	measured, err := h.recordMeasurement(caseID, 25.2, "Rui")
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(measured, http.StatusCreated); err != nil {
+		return err
+	}
+	measurementID, err := nestedStringPath(measured.Body, "measurements", 0, "id")
+	if err != nil {
+		return err
+	}
+
+	// The recording technician cannot confirm their own measurement.
+	selfConfirm, err := h.confirmMeasurement(caseID, measurementID, "Rui", "re-observed the reading")
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(selfConfirm, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(selfConfirm, "confirmation_not_independent"); err != nil {
+		return err
+	}
+
+	// A failed confirmation must not leave half a fact: no confirmation
+	// record, no audit event, and the case stays review_ready.
+	view, err := h.request(http.MethodGet, "/cases/"+caseID, nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(view, http.StatusOK); err != nil {
+		return err
+	}
+	confirmations, err := nestedSlice(view.Body, "confirmations")
+	if err != nil {
+		return err
+	}
+	if len(confirmations) != 0 {
+		return fmt.Errorf("failed confirmation left %d confirmation records", len(confirmations))
+	}
+	if hasEvent(view.Body, "confirmation_recorded") {
+		return errors.New("failed confirmation left an audit event")
+	}
+	state, err := nestedString(view.Body, "case", "state")
+	if err != nil {
+		return err
+	}
+	if state != "review_ready" {
+		return fmt.Errorf("failed confirmation changed case state to %q", state)
+	}
+
+	// A high-risk case cannot be sealed before the measurement is confirmed.
+	earlySeal, err := h.sealCase(caseID, "Reviewer-1")
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(earlySeal, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(earlySeal, "confirmation_required"); err != nil {
+		return err
+	}
+
+	// The rejected seal must not leave half a fact either.
+	view, err = h.request(http.MethodGet, "/cases/"+caseID, nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(view, http.StatusOK); err != nil {
+		return err
+	}
+	if _, exists := view.Body["seal"]; exists {
+		return errors.New("rejected seal left a seal record")
+	}
+	state, err = nestedString(view.Body, "case", "state")
+	if err != nil {
+		return err
+	}
+	if state != "review_ready" {
+		return fmt.Errorf("rejected seal changed case state to %q", state)
+	}
+
+	// An independent second person confirms the measurement with a basis.
+	confirmed, err := h.confirmMeasurement(caseID, measurementID, "Mira", "re-observed reading with reference standard REF-7")
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(confirmed, http.StatusCreated); err != nil {
+		return err
+	}
+	confirmationID, err := nestedStringPath(confirmed.Body, "confirmations", 0, "id")
+	if err != nil {
+		return err
+	}
+	confirmer, err := nestedStringPath(confirmed.Body, "confirmations", 0, "confirmer")
+	if err != nil {
+		return err
+	}
+	if confirmer != "Mira" {
+		return fmt.Errorf("confirmation confirmer = %q", confirmer)
+	}
+	confirmedMeasurement, err := nestedStringPath(confirmed.Body, "confirmations", 0, "measurement_id")
+	if err != nil {
+		return err
+	}
+	if confirmedMeasurement != measurementID {
+		return fmt.Errorf("confirmation measurement = %q, expected %q", confirmedMeasurement, measurementID)
+	}
+	basis, err := nestedStringPath(confirmed.Body, "confirmations", 0, "basis")
+	if err != nil {
+		return err
+	}
+	if basis == "" {
+		return errors.New("confirmation basis is missing")
+	}
+
+	// A second confirmation of the same measurement is rejected, even from
+	// a different person, and the original record stays untouched.
+	duplicate, err := h.confirmMeasurement(caseID, measurementID, "Vera", "second independent check")
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(duplicate, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(duplicate, "confirmation_exists"); err != nil {
+		return err
+	}
+	view, err = h.request(http.MethodGet, "/cases/"+caseID, nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(view, http.StatusOK); err != nil {
+		return err
+	}
+	confirmations, err = nestedSlice(view.Body, "confirmations")
+	if err != nil {
+		return err
+	}
+	if len(confirmations) != 1 {
+		return fmt.Errorf("duplicate confirmation changed record count to %d", len(confirmations))
+	}
+	stillConfirmer, err := nestedStringPath(view.Body, "confirmations", 0, "confirmer")
+	if err != nil {
+		return err
+	}
+	if stillConfirmer != "Mira" {
+		return fmt.Errorf("duplicate confirmation rewrote confirmer to %q", stillConfirmer)
+	}
+
+	// The seal now succeeds and cites the confirmation, making the chain
+	// measurement -> confirmation -> seal traceable.
+	sealed, err := h.sealCase(caseID, "Reviewer-1")
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(sealed, http.StatusCreated); err != nil {
+		return err
+	}
+	sealConfirmation, err := nestedString(sealed.Body, "seal", "confirmation_id")
+	if err != nil {
+		return err
+	}
+	if sealConfirmation != confirmationID {
+		return fmt.Errorf("seal confirmation_id = %q, expected %q", sealConfirmation, confirmationID)
+	}
+	sealMeasurement, err := nestedString(sealed.Body, "seal", "measurement_id")
+	if err != nil {
+		return err
+	}
+	if sealMeasurement != measurementID {
+		return fmt.Errorf("seal measurement_id = %q, expected %q", sealMeasurement, measurementID)
+	}
+	events, err := h.request(http.MethodGet, "/cases/"+caseID+"/events", nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(events, http.StatusOK); err != nil {
+		return err
+	}
+	if !hasEvent(events.Body, "confirmation_recorded") {
+		return errors.New("confirmation audit event is missing")
+	}
+
+	// A sealed case is terminal: no further confirmations are accepted.
+	lateConfirm, err := h.confirmMeasurement(caseID, measurementID, "Vera", "late check")
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(lateConfirm, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(lateConfirm, "state_conflict"); err != nil {
+		return err
+	}
+
+	// Concurrent confirmations of one measurement: exactly one wins and the
+	// loser leaves no record behind.
+	raceCaseID, raceMeasurementID, err := h.readyHighRiskCase("MET-1502")
+	if err != nil {
+		return err
+	}
+	type outcome struct {
+		response apiResponse
+		err      error
+	}
+	results := make(chan outcome, 2)
+	var wait sync.WaitGroup
+	for index := 0; index < 2; index++ {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			response, err := h.confirmMeasurement(raceCaseID, raceMeasurementID, fmt.Sprintf("Confirmer-%d", index+1), "independent re-observation")
+			results <- outcome{response: response, err: err}
+		}(index)
+	}
+	wait.Wait()
+	close(results)
+
+	successes := 0
+	conflicts := 0
+	for item := range results {
+		if item.err != nil {
+			return item.err
+		}
+		switch item.response.Status {
+		case http.StatusCreated:
+			successes++
+		case http.StatusConflict:
+			conflicts++
+		default:
+			return fmt.Errorf("unexpected concurrent confirmation status %d: %s", item.response.Status, item.response.Raw)
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		return fmt.Errorf("concurrent confirmation outcomes: %d success, %d conflict", successes, conflicts)
+	}
+	view, err = h.request(http.MethodGet, "/cases/"+raceCaseID, nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(view, http.StatusOK); err != nil {
+		return err
+	}
+	confirmations, err = nestedSlice(view.Body, "confirmations")
+	if err != nil {
+		return err
+	}
+	if len(confirmations) != 1 {
+		return fmt.Errorf("concurrent confirmations left %d records", len(confirmations))
 	}
 	return nil
 }
@@ -456,10 +734,42 @@ func (h *harness) openCase(deviceID string) (apiResponse, error) {
 	return response, nil
 }
 
+func (h *harness) openHighRiskCase(deviceID string) (apiResponse, error) {
+	response, err := h.request(http.MethodPost, "/cases", map[string]any{
+		"device_id":  deviceID,
+		"nominal":    25.0,
+		"tolerance":  0.5,
+		"steward":    "Qiao",
+		"risk_level": "high",
+	})
+	if err != nil {
+		return apiResponse{}, err
+	}
+	if err := expectStatus(response, http.StatusCreated); err != nil {
+		return apiResponse{}, err
+	}
+	return response, nil
+}
+
 func (h *harness) recordMeasurement(caseID string, observed float64, technician string) (apiResponse, error) {
 	return h.request(http.MethodPost, "/cases/"+caseID+"/measurements", map[string]any{
 		"observed":   observed,
 		"technician": technician,
+	})
+}
+
+func (h *harness) confirmMeasurement(caseID, measurementID, confirmer, basis string) (apiResponse, error) {
+	return h.request(http.MethodPost, "/cases/"+caseID+"/confirmations", map[string]any{
+		"measurement_id": measurementID,
+		"confirmer":      confirmer,
+		"basis":          basis,
+	})
+}
+
+func (h *harness) sealCase(caseID, reviewer string) (apiResponse, error) {
+	return h.request(http.MethodPost, "/cases/"+caseID+"/seal", map[string]any{
+		"reviewer": reviewer,
+		"summary":  "accepted measurement sealed for review",
 	})
 }
 
@@ -509,6 +819,33 @@ func (h *harness) readyCase(tag string) (string, error) {
 	return caseID, nil
 }
 
+func (h *harness) readyHighRiskCase(tag string) (string, string, error) {
+	deviceID, err := h.createDevice(tag)
+	if err != nil {
+		return "", "", err
+	}
+	opened, err := h.openHighRiskCase(deviceID)
+	if err != nil {
+		return "", "", err
+	}
+	caseID, err := nestedString(opened.Body, "case", "id")
+	if err != nil {
+		return "", "", err
+	}
+	response, err := h.recordMeasurement(caseID, 25.2, "Rui")
+	if err != nil {
+		return "", "", err
+	}
+	if err := expectStatus(response, http.StatusCreated); err != nil {
+		return "", "", err
+	}
+	measurementID, err := nestedStringPath(response.Body, "measurements", 0, "id")
+	if err != nil {
+		return "", "", err
+	}
+	return caseID, measurementID, nil
+}
+
 func expectStatus(response apiResponse, expected int) error {
 	if response.Status != expected {
 		return fmt.Errorf("status = %d, expected %d: %s", response.Status, expected, response.Raw)
@@ -535,6 +872,18 @@ func nestedString(root map[string]any, path ...string) (string, error) {
 	text, ok := value.(string)
 	if !ok {
 		return "", fmt.Errorf("%s is not a string", strings.Join(path, "."))
+	}
+	return text, nil
+}
+
+func nestedStringPath(root map[string]any, path ...any) (string, error) {
+	value, err := nestedAny(root, path...)
+	if err != nil {
+		return "", err
+	}
+	text, ok := value.(string)
+	if !ok {
+		return "", fmt.Errorf("%v is not a string", path)
 	}
 	return text, nil
 }
