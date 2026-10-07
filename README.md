@@ -21,6 +21,7 @@ go run ./cmd/workflowcheck --workflow register-device
 go run ./cmd/workflowcheck --workflow open-verification-case
 go run ./cmd/workflowcheck --workflow record-measurement
 go run ./cmd/workflowcheck --workflow reopen-verification-case
+go run ./cmd/workflowcheck --workflow confirm-measurement
 go run ./cmd/workflowcheck --workflow seal-verification
 ```
 
@@ -39,9 +40,15 @@ or extend these smoke checks with red/green verification tests.
 - `POST /cases`
 - `GET /cases/{id}`
 - `POST /cases/{id}/measurements`
+- `POST /cases/{id}/confirmations`
 - `POST /cases/{id}/reopen`
 - `POST /cases/{id}/seal`
 - `GET /cases/{id}/events`
+
+Cases are opened with a fixed `risk_level` (`standard` or `high`, default
+`standard`). A high-risk case cannot be sealed until its selected accepted
+measurement carries an independent confirmation from someone other than the
+recording technician. See PROJECT_SPEC.md for the full rules.
 
 ## Layout
 

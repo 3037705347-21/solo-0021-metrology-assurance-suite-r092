@@ -22,6 +22,7 @@ type VerificationCase struct {
 	Nominal   float64    `json:"nominal"`
 	Tolerance float64    `json:"tolerance"`
 	Steward   string     `json:"steward"`
+	RiskLevel RiskLevel  `json:"risk_level"`
 	State     CaseState  `json:"state"`
 	Version   int        `json:"version"`
 	OpenedAt  time.Time  `json:"opened_at"`
@@ -29,13 +30,14 @@ type VerificationCase struct {
 	SealedAt  *time.Time `json:"sealed_at,omitempty"`
 }
 
-func NewVerificationCase(id, deviceID string, nominal, tolerance float64, steward string, at time.Time) (VerificationCase, error) {
+func NewVerificationCase(id, deviceID string, nominal, tolerance float64, steward string, risk RiskLevel, at time.Time) (VerificationCase, error) {
 	item := VerificationCase{
 		ID:        strings.TrimSpace(id),
 		DeviceID:  strings.TrimSpace(deviceID),
 		Nominal:   nominal,
 		Tolerance: tolerance,
 		Steward:   strings.TrimSpace(steward),
+		RiskLevel: risk,
 		State:     CaseAwaitingMeasurement,
 		Version:   1,
 		OpenedAt:  at.UTC(),
@@ -50,6 +52,9 @@ func NewVerificationCase(id, deviceID string, nominal, tolerance float64, stewar
 func (c VerificationCase) Validate() error {
 	if c.ID == "" || c.DeviceID == "" || c.Steward == "" {
 		return fmt.Errorf("%w: case id, device id, and steward are required", ErrInvalidInput)
+	}
+	if !c.RiskLevel.Valid() {
+		return fmt.Errorf("%w: unsupported risk level %q", ErrInvalidInput, c.RiskLevel)
 	}
 	if !isFinite(c.Nominal) || !isFinite(c.Tolerance) || c.Tolerance <= 0 {
 		return fmt.Errorf("%w: nominal must be finite and tolerance must be positive", ErrInvalidInput)
@@ -88,6 +93,17 @@ func (c *VerificationCase) Reopen(at time.Time) error {
 		return fmt.Errorf("%w: only a recheck_required case can be reopened", ErrStateConflict)
 	}
 	c.State = CaseAwaitingMeasurement
+	c.Version++
+	c.UpdatedAt = at.UTC()
+	return nil
+}
+
+// RecordConfirmation bumps the case version for an appended independent
+// confirmation. Only a review_ready (not yet sealed) case can be confirmed.
+func (c *VerificationCase) RecordConfirmation(at time.Time) error {
+	if c.State != CaseReviewReady {
+		return fmt.Errorf("%w: only a review_ready case can receive an independent confirmation", ErrStateConflict)
+	}
 	c.Version++
 	c.UpdatedAt = at.UTC()
 	return nil

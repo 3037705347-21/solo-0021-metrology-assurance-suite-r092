@@ -9,31 +9,34 @@ import (
 )
 
 type Repository struct {
-	mu           sync.RWMutex
-	devices      map[string]domain.Device
-	cases        map[string]domain.VerificationCase
-	measurements map[string][]domain.Measurement
-	seals        map[string]domain.EvidenceSeal
-	events       []domain.AuditEvent
-	counters     map[string]int
+	mu            sync.RWMutex
+	devices       map[string]domain.Device
+	cases         map[string]domain.VerificationCase
+	measurements  map[string][]domain.Measurement
+	confirmations map[string][]domain.IndependentConfirmation
+	seals         map[string]domain.EvidenceSeal
+	events        []domain.AuditEvent
+	counters      map[string]int
 }
 
 func New() *Repository {
 	return &Repository{
-		devices:      make(map[string]domain.Device),
-		cases:        make(map[string]domain.VerificationCase),
-		measurements: make(map[string][]domain.Measurement),
-		seals:        make(map[string]domain.EvidenceSeal),
-		counters:     make(map[string]int),
+		devices:       make(map[string]domain.Device),
+		cases:         make(map[string]domain.VerificationCase),
+		measurements:  make(map[string][]domain.Measurement),
+		confirmations: make(map[string][]domain.IndependentConfirmation),
+		seals:         make(map[string]domain.EvidenceSeal),
+		counters:      make(map[string]int),
 	}
 }
 
 type Snapshot struct {
-	devices      map[string]domain.Device
-	cases        map[string]domain.VerificationCase
-	measurements map[string][]domain.Measurement
-	seals        map[string]domain.EvidenceSeal
-	events       []domain.AuditEvent
+	devices       map[string]domain.Device
+	cases         map[string]domain.VerificationCase
+	measurements  map[string][]domain.Measurement
+	confirmations map[string][]domain.IndependentConfirmation
+	seals         map[string]domain.EvidenceSeal
+	events        []domain.AuditEvent
 }
 
 func (s Snapshot) Device(id string) (domain.Device, bool) {
@@ -59,13 +62,26 @@ func (s Snapshot) Measurements(caseID string) []domain.Measurement {
 	return append([]domain.Measurement(nil), s.measurements[caseID]...)
 }
 
+func (s Snapshot) Measurement(caseID, measurementID string) (domain.Measurement, bool) {
+	for _, item := range s.measurements[caseID] {
+		if item.ID == measurementID {
+			return item, true
+		}
+	}
+	return domain.Measurement{}, false
+}
+
+func (s Snapshot) Confirmations(caseID string) []domain.IndependentConfirmation {
+	return append([]domain.IndependentConfirmation(nil), s.confirmations[caseID]...)
+}
+
 func (s Snapshot) Seal(caseID string) (domain.EvidenceSeal, bool) {
 	item, ok := s.seals[caseID]
 	return item, ok
 }
 
 func (s Snapshot) Events(caseID string) []domain.AuditEvent {
-	var result []domain.AuditEvent
+	result := make([]domain.AuditEvent, 0)
 	for _, item := range s.events {
 		if item.CaseID == caseID {
 			result = append(result, item)
@@ -91,12 +107,13 @@ func (s Snapshot) AllCases() []domain.VerificationCase {
 }
 
 type Mutation struct {
-	devices      map[string]domain.Device
-	cases        map[string]domain.VerificationCase
-	measurements map[string][]domain.Measurement
-	seals        map[string]domain.EvidenceSeal
-	events       []domain.AuditEvent
-	counters     map[string]int
+	devices       map[string]domain.Device
+	cases         map[string]domain.VerificationCase
+	measurements  map[string][]domain.Measurement
+	confirmations map[string][]domain.IndependentConfirmation
+	seals         map[string]domain.EvidenceSeal
+	events        []domain.AuditEvent
+	counters      map[string]int
 }
 
 func (m *Mutation) NextID(prefix string) string {
@@ -176,6 +193,36 @@ func (m *Mutation) Measurements(caseID string) []domain.Measurement {
 	return append([]domain.Measurement(nil), m.measurements[caseID]...)
 }
 
+func (m *Mutation) Measurement(caseID, measurementID string) (domain.Measurement, bool) {
+	for _, item := range m.measurements[caseID] {
+		if item.ID == measurementID {
+			return item, true
+		}
+	}
+	return domain.Measurement{}, false
+}
+
+// AppendConfirmation stores an append-only independent confirmation. The
+// repository enforces that one confirmer cannot confirm the same measurement
+// twice, so duplicate retries cannot manufacture extra qualifying evidence.
+func (m *Mutation) AppendConfirmation(item domain.IndependentConfirmation) error {
+	if _, exists := m.cases[item.CaseID]; !exists {
+		return fmt.Errorf("%w: case %s", domain.ErrNotFound, item.CaseID)
+	}
+	for _, existing := range m.confirmations[item.CaseID] {
+		if existing.MeasurementID == item.MeasurementID &&
+			domain.NormalizePerson(existing.Confirmer) == domain.NormalizePerson(item.Confirmer) {
+			return fmt.Errorf("%w: confirmer %s already confirmed measurement %s", domain.ErrDuplicateConfirmation, item.Confirmer, item.MeasurementID)
+		}
+	}
+	m.confirmations[item.CaseID] = append(m.confirmations[item.CaseID], item)
+	return nil
+}
+
+func (m *Mutation) Confirmations(caseID string) []domain.IndependentConfirmation {
+	return append([]domain.IndependentConfirmation(nil), m.confirmations[caseID]...)
+}
+
 func (m *Mutation) Seal(caseID string) (domain.EvidenceSeal, bool) {
 	item, ok := m.seals[caseID]
 	return item, ok
@@ -194,7 +241,7 @@ func (m *Mutation) AppendEvent(item domain.AuditEvent) {
 }
 
 func (m *Mutation) Events(caseID string) []domain.AuditEvent {
-	var result []domain.AuditEvent
+	result := make([]domain.AuditEvent, 0)
 	for _, item := range m.events {
 		if item.CaseID == caseID {
 			result = append(result, item)
@@ -220,12 +267,13 @@ func (r *Repository) Mutate(ctx context.Context, fn func(*Mutation) error) error
 	defer r.mu.Unlock()
 
 	next := &Mutation{
-		devices:      cloneDevices(r.devices),
-		cases:        cloneCases(r.cases),
-		measurements: cloneMeasurements(r.measurements),
-		seals:        cloneSeals(r.seals),
-		events:       append([]domain.AuditEvent(nil), r.events...),
-		counters:     cloneCounters(r.counters),
+		devices:       cloneDevices(r.devices),
+		cases:         cloneCases(r.cases),
+		measurements:  cloneMeasurements(r.measurements),
+		confirmations: cloneConfirmations(r.confirmations),
+		seals:         cloneSeals(r.seals),
+		events:        append([]domain.AuditEvent(nil), r.events...),
+		counters:      cloneCounters(r.counters),
 	}
 	if err := fn(next); err != nil {
 		return err
@@ -233,6 +281,7 @@ func (r *Repository) Mutate(ctx context.Context, fn func(*Mutation) error) error
 	r.devices = next.devices
 	r.cases = next.cases
 	r.measurements = next.measurements
+	r.confirmations = next.confirmations
 	r.seals = next.seals
 	r.events = next.events
 	r.counters = next.counters
@@ -241,11 +290,12 @@ func (r *Repository) Mutate(ctx context.Context, fn func(*Mutation) error) error
 
 func (r *Repository) snapshot() Snapshot {
 	return Snapshot{
-		devices:      cloneDevices(r.devices),
-		cases:        cloneCases(r.cases),
-		measurements: cloneMeasurements(r.measurements),
-		seals:        cloneSeals(r.seals),
-		events:       append([]domain.AuditEvent(nil), r.events...),
+		devices:       cloneDevices(r.devices),
+		cases:         cloneCases(r.cases),
+		measurements:  cloneMeasurements(r.measurements),
+		confirmations: cloneConfirmations(r.confirmations),
+		seals:         cloneSeals(r.seals),
+		events:        append([]domain.AuditEvent(nil), r.events...),
 	}
 }
 
@@ -269,6 +319,14 @@ func cloneMeasurements(values map[string][]domain.Measurement) map[string][]doma
 	result := make(map[string][]domain.Measurement, len(values))
 	for key, value := range values {
 		result[key] = append([]domain.Measurement(nil), value...)
+	}
+	return result
+}
+
+func cloneConfirmations(values map[string][]domain.IndependentConfirmation) map[string][]domain.IndependentConfirmation {
+	result := make(map[string][]domain.IndependentConfirmation, len(values))
+	for key, value := range values {
+		result[key] = append([]domain.IndependentConfirmation(nil), value...)
 	}
 	return result
 }

@@ -75,7 +75,7 @@
       "steps": [
         "verify the device exists and is active",
         "reject a second unfinished case for the same device",
-        "open one waiting case with a nominal value and tolerance"
+        "open one waiting case with a nominal value, tolerance, and fixed risk level"
       ],
       "success": "returns an awaiting_measurement case",
       "failure": "returns not-found or active-case conflict errors",
@@ -135,17 +135,41 @@
       ]
     },
     {
+      "id": "confirm-measurement",
+      "name": "Independently confirm measurement",
+      "entry": "POST /cases/{id}/confirmations",
+      "steps": [
+        "verify the case is high risk, review_ready, and unsealed",
+        "verify the measurement exists and was accepted",
+        "reject the recording technician and duplicate confirmers",
+        "append the immutable confirmation snapshot and audit event atomically"
+      ],
+      "success": "returns the case with one traceable independent confirmation",
+      "failure": "returns not-found, conflict, independent-party, duplicate, or not-applicable errors without partial state",
+      "verification": "workflowcheck covers the unsatisfied seal gate, same-person and duplicate rejections, snapshot contents, and sealed-case immutability",
+      "module_ids": [
+        "runtimecheck",
+        "httpapi",
+        "assurance",
+        "domain",
+        "repository",
+        "contracts",
+        "bootstrap"
+      ]
+    },
+    {
       "id": "seal-verification",
       "name": "Seal verification",
       "entry": "POST /cases/{id}/seal",
       "steps": [
         "verify the case is ready for review",
         "select the accepted measurement with the smallest deviation",
-        "create exactly one seal and make the case terminal"
+        "enforce the fixed risk-level independent-confirmation gate",
+        "reference the satisfying confirmations and make the case terminal with exactly one seal"
       ],
       "success": "returns a sealed case and one evidence seal",
-      "failure": "returns conflict for a non-reviewable case or a duplicate seal",
-      "verification": "workflowcheck races two seal requests and verifies exactly one succeeds",
+      "failure": "returns conflict for a non-reviewable case, an unsatisfied confirmation gate, or a duplicate seal",
+      "verification": "workflowcheck races two seal requests and a confirmation against a seal over many rounds, verifying exactly one seal only after the gate",
       "module_ids": [
         "runtimecheck",
         "httpapi",
